@@ -1,0 +1,133 @@
+﻿@page "/"
+@inject UploadedFileProcessor FileProcessor
+
+<PageTitle>Secure File Editor</PageTitle>
+
+<div class="editor-page">
+    <header class="page-heading">
+        <div>
+            <p class="eyebrow">File upload</p>
+            <h1>Secure File Editor</h1>
+        </div>
+
+        <div class="upload-limit">Max @FormatBytes(UploadedFileProcessor.MaxFileSize)</div>
+    </header>
+
+    <section class="upload-panel" aria-labelledby="upload-title">
+        <div class="panel-heading">
+            <div>
+                <h2 id="upload-title">Upload</h2>
+                <p>.txt, .htm, .html</p>
+            </div>
+
+            @if (isProcessing)
+            {
+                <span class="status-pill neutral">Checking</span>
+            }
+            else if (processedUpload is not null)
+            {
+                <span class="status-pill success">Ready</span>
+            }
+            else
+            {
+                <span class="status-pill">Idle</span>
+            }
+        </div>
+
+        <InputFile class="file-input"
+                   OnChange="HandleFileSelected"
+                   accept=".txt,.htm,.html,text/plain,text/html"
+                   disabled="@isProcessing" />
+
+        @if (!string.IsNullOrWhiteSpace(errorMessage))
+        {
+            <div class="message error" role="alert">@errorMessage</div>
+        }
+
+        @if (processedUpload is not null && string.IsNullOrWhiteSpace(errorMessage))
+        {
+            <dl class="file-summary">
+                <div>
+                    <dt>Name</dt>
+                    <dd>@processedUpload.FileName</dd>
+                </div>
+                <div>
+                    <dt>Size</dt>
+                    <dd>@FormatBytes(processedUpload.Size)</dd>
+                </div>
+                <div>
+                    <dt>Mode</dt>
+                    <dd>@(processedUpload.WasHtml ? "Sanitized HTML" : "Plain text")</dd>
+                </div>
+            </dl>
+        }
+    </section>
+
+    <section class="editor-panel" aria-labelledby="editor-title">
+        <div class="panel-heading">
+            <div>
+                <h2 id="editor-title">Editor</h2>
+                <p>@CharacterCountLabel</p>
+            </div>
+
+            <button class="btn btn-outline-secondary"
+                    type="button"
+                    @onclick="ClearEditor"
+                    disabled="@(isProcessing || string.IsNullOrEmpty(editorText))">
+                Clear
+            </button>
+        </div>
+
+        <textarea class="content-editor"
+                  @bind="editorText"
+                  @bind:event="oninput"
+                  spellcheck="false"
+                  aria-label="Uploaded file text editor"></textarea>
+    </section>
+</div>
+
+@code {
+    private ProcessedUpload? processedUpload;
+    private string editorText = string.Empty;
+    private string? errorMessage;
+    private bool isProcessing;
+
+    private string CharacterCountLabel =>
+        editorText.Length == 1 ? "1 character" : $"{editorText.Length:N0} characters";
+
+    private async Task HandleFileSelected(InputFileChangeEventArgs args)
+    {
+        isProcessing = true;
+        errorMessage = null;
+        processedUpload = null;
+        editorText = string.Empty;
+
+        try
+        {
+            processedUpload = await FileProcessor.ProcessAsync(args.File);
+            editorText = processedUpload.Text;
+        }
+        catch (InvalidDataException ex)
+        {
+            errorMessage = ex.Message;
+        }
+        catch (IOException)
+        {
+            errorMessage = "The selected file could not be read.";
+        }
+        finally
+        {
+            isProcessing = false;
+        }
+    }
+
+    private void ClearEditor()
+    {
+        editorText = string.Empty;
+        processedUpload = null;
+        errorMessage = null;
+    }
+
+    private static string FormatBytes(long bytes) =>
+        bytes >= 1_048_576 ? $"{bytes / 1_048_576d:0.#} MB" : $"{bytes / 1024d:0.#} KB";
+}
