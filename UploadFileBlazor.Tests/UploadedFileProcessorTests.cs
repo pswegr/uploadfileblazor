@@ -21,7 +21,7 @@ public sealed class UploadedFileProcessorTests
 
         Assert.True(processed.WasHtml, "HTML extension should mark the upload as HTML.");
         AssertContains("<h1 id=\"hero\" class=\"primary-title\">Hi &amp; welcome</h1>", processed.Text);
-        AssertContains("<p>Hello <strong>{{FirstName}}</strong><br><a href=\"https://example.com/welcome?x=1&amp;y=2\" target=\"_blank\" rel=\"noopener\">Start</a></p>", processed.Text);
+        AssertContains("<p>Hello <strong>{{FirstName}}</strong><br><a href=\"https://example.com/welcome?x=1&amp;y=2\" target=\"_blank\" rel=\"noopener noreferrer\">Start</a></p>", processed.Text);
         AssertContains("<table width=\"100%\"><tr><td align=\"center\">Body</td></tr></table>", processed.Text);
         AssertNoExecutableHtml(processed.Text);
     }
@@ -34,6 +34,14 @@ public sealed class UploadedFileProcessorTests
 
         Assert.False(processed.WasHtml, "txt extension should remain plain text.");
         Assert.Equal(text, processed.Text);
+    }
+
+    [Fact]
+    public async Task RemovesUnsafeControlCharactersFromTextUploads()
+    {
+        var processed = await ProcessTextAsync("Hello\u007F \u0085World");
+
+        Assert.Equal("Hello World", processed.Text);
     }
 
     [Fact]
@@ -165,6 +173,16 @@ public sealed class UploadedFileProcessorTests
     }
 
     [Fact]
+    public async Task ForcesNoopenerAndNoreferrerForBlankTargets()
+    {
+        var processed = await ProcessHtmlAsync(
+            "<a href=\"https://example.com\" target=\"_blank\" rel=\"nofollow opener\">Open</a>");
+
+        AssertContains("target=\"_blank\" rel=\"noopener noreferrer nofollow\"", processed.Text);
+        AssertNoExecutableHtml(processed.Text);
+    }
+
+    [Fact]
     public async Task RejectsInvalidUtf8()
     {
         await Assert.ThrowsAsync<InvalidDataException>(() =>
@@ -179,6 +197,16 @@ public sealed class UploadedFileProcessorTests
     }
 
     [Fact]
+    public async Task NormalizesUntrustedFileNameAndContentTypeMetadata()
+    {
+        var processed = await ProcessBytesAsync(@"C:\fakepath\<template>.HTML", "image/svg+xml", Encoding.UTF8.GetBytes("<p>Safe</p>"));
+
+        Assert.Equal("_template_.HTML", processed.FileName);
+        Assert.Equal("text/html", processed.ContentType);
+        Assert.True(processed.WasHtml);
+    }
+
+    [Fact]
     public async Task RejectsEmptyFiles()
     {
         await Assert.ThrowsAsync<InvalidDataException>(() =>
@@ -190,6 +218,15 @@ public sealed class UploadedFileProcessorTests
     {
         await Assert.ThrowsAsync<InvalidDataException>(() =>
             new UploadedFileProcessor().ProcessAsync(new TestBrowserFile("huge.html", "text/html", Encoding.UTF8.GetBytes("x"), UploadedFileProcessor.MaxFileSize + 1)));
+    }
+
+    [Fact]
+    public async Task RejectsStreamsThatExceedLimitEvenWhenReportedSizeIsSmaller()
+    {
+        var bytes = new byte[(int)UploadedFileProcessor.MaxFileSize + 1];
+
+        await Assert.ThrowsAsync<InvalidDataException>(() =>
+            new UploadedFileProcessor().ProcessAsync(new TestBrowserFile("huge.html", "text/html", bytes, reportedSize: 1)));
     }
 
     private static async Task<ProcessedUpload> ProcessHtmlAsync(string html) =>

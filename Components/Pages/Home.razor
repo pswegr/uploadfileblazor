@@ -73,14 +73,15 @@
             <button class="btn btn-outline-secondary"
                     type="button"
                     @onclick="ClearEditor"
-                    disabled="@(isProcessing || string.IsNullOrEmpty(editorText))">
+                    disabled="@(isProcessing || string.IsNullOrEmpty(EditorText))">
                 Clear
             </button>
         </div>
 
         <textarea class="content-editor"
-                  @bind="editorText"
+                  @bind="EditorText"
                   @bind:event="oninput"
+                  maxlength="@UploadedFileProcessor.MaxTextCharacters"
                   spellcheck="false"
                   aria-label="Uploaded file text editor"></textarea>
     </section>
@@ -93,19 +94,31 @@
     private bool isProcessing;
 
     private string CharacterCountLabel =>
-        editorText.Length == 1 ? "1 character" : $"{editorText.Length:N0} characters";
+        EditorText.Length == 1 ? "1 character" : $"{EditorText.Length:N0} characters";
+
+    private string EditorText
+    {
+        get => editorText;
+        set
+        {
+            var safeValue = value ?? string.Empty;
+            editorText = safeValue.Length <= UploadedFileProcessor.MaxTextCharacters
+                ? safeValue
+                : safeValue[..UploadedFileProcessor.MaxTextCharacters];
+        }
+    }
 
     private async Task HandleFileSelected(InputFileChangeEventArgs args)
     {
         isProcessing = true;
         errorMessage = null;
         processedUpload = null;
-        editorText = string.Empty;
+        EditorText = string.Empty;
 
         try
         {
             processedUpload = await FileProcessor.ProcessAsync(args.File);
-            editorText = processedUpload.Text;
+            EditorText = processedUpload.Text;
         }
         catch (InvalidDataException ex)
         {
@@ -123,7 +136,7 @@
 
     private void ClearEditor()
     {
-        editorText = string.Empty;
+        EditorText = string.Empty;
         processedUpload = null;
         errorMessage = null;
     }

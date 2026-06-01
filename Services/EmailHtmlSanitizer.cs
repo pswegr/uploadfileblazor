@@ -126,6 +126,14 @@ internal static partial class EmailHtmlSanitizer
         "https",
         "cid"
     };
+    private static readonly string[] AllowedRelTokens =
+    [
+        "noopener",
+        "noreferrer",
+        "nofollow",
+        "ugc",
+        "sponsored"
+    ];
 
     private static readonly HashSet<string> AlignmentValues = new(StringComparer.OrdinalIgnoreCase)
     {
@@ -314,6 +322,8 @@ internal static partial class EmailHtmlSanitizer
     {
         var attributes = ParseAttributes(rawAttributes);
         var emittedAttributes = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var sanitizedAttributes = new List<HtmlAttribute>();
+        var relTokens = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         var opensInNewWindow = false;
 
         foreach (var attribute in attributes)
@@ -334,18 +344,37 @@ internal static partial class EmailHtmlSanitizer
                 opensInNewWindow = true;
             }
 
-            sanitized.Append(' ')
-                .Append(sanitizedName)
-                .Append("=\"")
-                .Append(HtmlEncodeAttribute(sanitizedValue))
-                .Append('"');
+            if (tagName.Equals("a", StringComparison.OrdinalIgnoreCase) &&
+                sanitizedName.Equals("rel", StringComparison.OrdinalIgnoreCase))
+            {
+                AddRelTokens(relTokens, sanitizedValue);
+                continue;
+            }
+
+            sanitizedAttributes.Add(new HtmlAttribute(sanitizedName, sanitizedValue));
         }
 
-        if (tagName.Equals("a", StringComparison.OrdinalIgnoreCase) &&
-            opensInNewWindow &&
-            !emittedAttributes.Contains("rel"))
+        if (tagName.Equals("a", StringComparison.OrdinalIgnoreCase))
         {
-            sanitized.Append(" rel=\"noopener noreferrer\"");
+            if (opensInNewWindow)
+            {
+                relTokens.Add("noopener");
+                relTokens.Add("noreferrer");
+            }
+
+            if (relTokens.Count > 0)
+            {
+                sanitizedAttributes.Add(new HtmlAttribute("rel", FormatRelTokens(relTokens)));
+            }
+        }
+
+        foreach (var attribute in sanitizedAttributes)
+        {
+            sanitized.Append(' ')
+                .Append(attribute.Name)
+                .Append("=\"")
+                .Append(HtmlEncodeAttribute(attribute.Value))
+                .Append('"');
         }
     }
 
@@ -641,14 +670,26 @@ internal static partial class EmailHtmlSanitizer
 
     private static bool TrySanitizeRel(string value, out string sanitizedValue)
     {
-        var safeTokens = value.Split(' ', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
-            .Where(token => IsOneOf(token, "noopener", "noreferrer", "nofollow", "ugc", "sponsored"))
-            .Distinct(StringComparer.OrdinalIgnoreCase)
-            .ToArray();
+        var safeTokens = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        AddRelTokens(safeTokens, value);
 
-        sanitizedValue = string.Join(' ', safeTokens).ToLowerInvariant();
+        sanitizedValue = FormatRelTokens(safeTokens);
         return sanitizedValue.Length > 0;
     }
+
+    private static void AddRelTokens(HashSet<string> relTokens, string value)
+    {
+        foreach (var token in value.Split(' ', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+        {
+            if (AllowedRelTokens.Contains(token, StringComparer.OrdinalIgnoreCase))
+            {
+                relTokens.Add(token);
+            }
+        }
+    }
+
+    private static string FormatRelTokens(HashSet<string> relTokens) =>
+        string.Join(' ', AllowedRelTokens.Where(relTokens.Contains));
 
     private static bool IsOneOf(string value, params string[] allowedValues) =>
         allowedValues.Any(allowedValue => value.Equals(allowedValue, StringComparison.OrdinalIgnoreCase));
@@ -696,7 +737,7 @@ internal static partial class EmailHtmlSanitizer
 
         foreach (var character in value)
         {
-            if (character is '\t' or '\n' or '\r' || character >= ' ')
+            if (character is '\t' or '\n' or '\r' || !char.IsControl(character))
             {
                 sanitized.Append(character);
             }

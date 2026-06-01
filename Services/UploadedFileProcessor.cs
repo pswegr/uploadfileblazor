@@ -6,6 +6,7 @@ namespace UploadFileBlazor.Services;
 public sealed class UploadedFileProcessor
 {
     public const long MaxFileSize = 5 * 1_048_576;
+    public const int MaxTextCharacters = (int)MaxFileSize;
 
     private static readonly UTF8Encoding StrictUtf8 = new(false, true);
     private static readonly HashSet<string> AllowedExtensions = new(StringComparer.OrdinalIgnoreCase)
@@ -14,10 +15,31 @@ public sealed class UploadedFileProcessor
         ".htm",
         ".html"
     };
+    private static readonly Dictionary<string, string> CanonicalContentTypes = new(StringComparer.OrdinalIgnoreCase)
+    {
+        [".txt"] = "text/plain",
+        [".htm"] = "text/html",
+        [".html"] = "text/html"
+    };
+    private static readonly HashSet<char> UnsafeFileNameCharacters = new(Path.GetInvalidFileNameChars())
+    {
+        '<',
+        '>',
+        ':',
+        '"',
+        '/',
+        '\\',
+        '|',
+        '?',
+        '*'
+    };
+
+    private const int MaxFileNameLength = 120;
 
     public async Task<ProcessedUpload> ProcessAsync(IBrowserFile file, CancellationToken cancellationToken = default)
     {
-        var extension = Path.GetExtension(file.Name);
+        var safeFileName = SanitizeFileName(file.Name);
+        var extension = Path.GetExtension(safeFileName);
         if (!AllowedExtensions.Contains(extension))
         {
             throw new InvalidDataException("Only .txt, .htm, and .html files are supported.");
@@ -40,8 +62,8 @@ public sealed class UploadedFileProcessor
         var sanitizedText = isHtml ? SanitizeHtmlMarkup(fileText) : fileText;
 
         return new ProcessedUpload(
-            file.Name,
-            file.ContentType,
+            safeFileName,
+            CanonicalContentTypes[extension],
             file.Size,
             sanitizedText,
             isHtml);
@@ -50,9 +72,26 @@ public sealed class UploadedFileProcessor
     private static async Task<string> ReadUtf8TextAsync(IBrowserFile file, CancellationToken cancellationToken)
     {
         await using var stream = file.OpenReadStream(MaxFileSize, cancellationToken);
-        using var memoryStream = new MemoryStream((int)file.Size);
+        using var memoryStream = new MemoryStream((int)Math.Min(file.Size, MaxFileSize));
+        var buffer = new byte[81920];
+        long bytesReadTotal = 0;
 
-        await stream.CopyToAsync(memoryStream, cancellationToken);
+        while (true)
+        {
+            var bytesRead = await stream.ReadAsync(buffer, cancellationToken);
+            if (bytesRead == 0)
+            {
+                break;
+            }
+
+            bytesReadTotal += bytesRead;
+            if (bytesReadTotal > MaxFileSize)
+            {
+                throw new InvalidDataException($"The selected file is too large. Maximum size is {FormatBytes(MaxFileSize)}.");
+            }
+
+            await memoryStream.WriteAsync(buffer.AsMemory(0, bytesRead), cancellationToken);
+        }
 
         try
         {
@@ -75,7 +114,7 @@ public sealed class UploadedFileProcessor
 
         foreach (var character in value)
         {
-            if (character is '\t' or '\n' or '\r' || character >= ' ')
+            if (IsSafeContentCharacter(character))
             {
                 sanitized.Append(character);
             }
@@ -83,6 +122,41 @@ public sealed class UploadedFileProcessor
 
         return sanitized.ToString();
     }
+
+    private static string SanitizeFileName(string fileName)
+    {
+        var lastSegment = fileName
+            .Split(['/', '\\'], StringSplitOptions.RemoveEmptyEntries)
+            .LastOrDefault() ?? string.Empty;
+        var sanitized = new StringBuilder(lastSegment.Length);
+
+        foreach (var character in lastSegment)
+        {
+            sanitized.Append(IsSafeContentCharacter(character) && !UnsafeFileNameCharacters.Contains(character)
+                ? character
+                : '_');
+        }
+
+        var safeFileName = sanitized.ToString().Trim();
+        if (safeFileName.Length == 0)
+        {
+            throw new InvalidDataException("The selected file name is invalid.");
+        }
+
+        if (safeFileName.Length <= MaxFileNameLength)
+        {
+            return safeFileName;
+        }
+
+        var extension = Path.GetExtension(safeFileName);
+        var nameWithoutExtension = Path.GetFileNameWithoutExtension(safeFileName);
+        var maxNameLength = Math.Max(1, MaxFileNameLength - extension.Length);
+
+        return nameWithoutExtension[..Math.Min(nameWithoutExtension.Length, maxNameLength)] + extension;
+    }
+
+    private static bool IsSafeContentCharacter(char character) =>
+        character is '\t' or '\n' or '\r' || !char.IsControl(character);
 
     private static string NormalizeLineEndings(string value) =>
         value.Replace("\r\n", "\n").Replace('\r', '\n');
