@@ -1,0 +1,4 @@
+<Solution>
+  <Project Path="UploadFileBlazor.csproj" />
+  <Project Path="UploadFileBlazor.Tests/UploadFileBlazor.Tests.csproj" />
+</Solution>

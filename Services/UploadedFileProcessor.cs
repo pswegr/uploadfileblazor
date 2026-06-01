@@ -1,6 +1,4 @@
-using System.Net;
 using System.Text;
-using System.Text.RegularExpressions;
 using Microsoft.AspNetCore.Components.Forms;
 
 namespace UploadFileBlazor.Services;
@@ -16,20 +14,6 @@ public sealed class UploadedFileProcessor
         ".htm",
         ".html"
     };
-
-    private static readonly (Regex Pattern, string Message)[] DangerousPatterns =
-    [
-        (new Regex(@"<\s*/?\s*script\b", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant | RegexOptions.Compiled),
-            "Script tags are not allowed."),
-        (new Regex(@"<[^>]+\s+on[a-z0-9_:-]+\s*=", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant | RegexOptions.Compiled),
-            "Inline event handler attributes are not allowed."),
-        (new Regex(@"\b(?:href|src|xlink:href|action|formaction|srcdoc)\s*=\s*(['""]?)\s*(?:j\s*a\s*v\s*a\s*s\s*c\s*r\s*i\s*p\s*t|v\s*b\s*s\s*c\s*r\s*i\s*p\s*t|d\s*a\s*t\s*a)\s*:",
-            RegexOptions.IgnoreCase | RegexOptions.CultureInvariant | RegexOptions.Compiled),
-            "Scriptable URL values are not allowed."),
-        (new Regex(@"expression\s*\(|url\s*\(\s*(['""]?)\s*j\s*a\s*v\s*a\s*s\s*c\s*r\s*i\s*p\s*t\s*:",
-            RegexOptions.IgnoreCase | RegexOptions.CultureInvariant | RegexOptions.Compiled),
-            "Scriptable CSS expressions are not allowed.")
-    ];
 
     public async Task<ProcessedUpload> ProcessAsync(IBrowserFile file, CancellationToken cancellationToken = default)
     {
@@ -52,12 +36,8 @@ public sealed class UploadedFileProcessor
         var fileText = await ReadUtf8TextAsync(file, cancellationToken);
         fileText = NormalizeLineEndings(RemoveUnsafeControlCharacters(fileText));
 
-        ValidateNoScripts(fileText);
-
         var isHtml = IsHtmlExtension(extension);
         var sanitizedText = isHtml ? SanitizeHtmlMarkup(fileText) : fileText;
-
-        ValidateNoScripts(sanitizedText);
 
         return new ProcessedUpload(
             file.Name,
@@ -84,22 +64,9 @@ public sealed class UploadedFileProcessor
         }
     }
 
-    private static void ValidateNoScripts(string value)
-    {
-        var decodedValue = WebUtility.HtmlDecode(value);
-
-        foreach (var (pattern, message) in DangerousPatterns)
-        {
-            if (pattern.IsMatch(value) || pattern.IsMatch(decodedValue))
-            {
-                throw new InvalidDataException(message);
-            }
-        }
-    }
-
     private static string SanitizeHtmlMarkup(string html)
     {
-        return NormalizeLineEndings(RemoveUnsafeControlCharacters(html)).Trim();
+        return EmailHtmlSanitizer.Sanitize(html);
     }
 
     private static string RemoveUnsafeControlCharacters(string value)
