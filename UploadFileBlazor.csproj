@@ -7,4 +7,8 @@
     <DefaultItemExcludes>$(DefaultItemExcludes);UploadFileBlazor.Tests/**</DefaultItemExcludes>
   </PropertyGroup>
 
+  <ItemGroup>
+    <PackageReference Include="HtmlSanitizer" Version="9.0.892" />
+  </ItemGroup>
+
 </Project>

@@ -1,15 +1,26 @@
-using System.Net;
-using System.Text;
 using System.Text.RegularExpressions;
+using AngleSharp.Css.Dom;
+using AngleSharp.Dom;
+using Ganss.Xss;
 
 namespace UploadFileBlazor.Services;
 
 internal static partial class EmailHtmlSanitizer
 {
-    private const int MaxDecodePasses = 8;
+    private const string AdditionalUnsafeCssValuePattern =
+        @"(?:expression\s*\(|javascript\s*:|vbscript\s*:|data\s*:|-\s*moz\s*-\s*binding|behavior\s*:)";
 
-    private static readonly HashSet<string> AllowedElements = new(StringComparer.OrdinalIgnoreCase)
-    {
+    private static readonly Regex DisallowedCssPropertyValueRegex = new(
+        $"{HtmlSanitizer.DefaultDisallowedCssPropertyValue}|{AdditionalUnsafeCssValuePattern}",
+        RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+
+    private static readonly string[] HttpsSchemes =
+    [
+        "https"
+    ];
+
+    private static readonly string[] AllowedTags =
+    [
         "a",
         "abbr",
         "b",
@@ -35,11 +46,14 @@ internal static partial class EmailHtmlSanitizer
         "h4",
         "h5",
         "h6",
+        "head",
         "hr",
         "html",
         "i",
         "img",
         "li",
+        "link",
+        "meta",
         "ol",
         "p",
         "pre",
@@ -48,6 +62,7 @@ internal static partial class EmailHtmlSanitizer
         "small",
         "span",
         "strong",
+        "style",
         "sub",
         "sup",
         "table",
@@ -59,60 +74,69 @@ internal static partial class EmailHtmlSanitizer
         "tr",
         "u",
         "ul"
-    };
+    ];
 
-    private static readonly HashSet<string> VoidElements = new(StringComparer.OrdinalIgnoreCase)
-    {
-        "br",
-        "col",
-        "hr",
-        "img"
-    };
-
-    private static readonly HashSet<string> DangerousContentElements = new(StringComparer.OrdinalIgnoreCase)
-    {
-        "applet",
-        "audio",
-        "base",
-        "button",
-        "canvas",
-        "embed",
-        "fieldset",
-        "form",
-        "frame",
-        "frameset",
-        "head",
-        "iframe",
-        "input",
-        "link",
-        "math",
-        "meta",
-        "noscript",
-        "object",
-        "option",
-        "plaintext",
-        "script",
-        "select",
-        "source",
-        "style",
-        "svg",
-        "template",
-        "textarea",
-        "title",
-        "track",
-        "video",
-        "xmp"
-    };
-
-    private static readonly HashSet<string> GlobalTextAttributes = new(StringComparer.OrdinalIgnoreCase)
-    {
+    private static readonly string[] AllowedAttributes =
+    [
+        "align",
+        "alink",
+        "alt",
+        "aria-describedby",
+        "aria-hidden",
+        "aria-label",
+        "aria-labelledby",
+        "aria-live",
+        "bgcolor",
+        "border",
+        "cellpadding",
+        "cellspacing",
+        "charset",
         "class",
+        "color",
+        "colspan",
+        "content",
+        "crossorigin",
         "dir",
+        "face",
+        "height",
+        "http-equiv",
+        "href",
         "id",
         "lang",
+        "link",
+        "media",
+        "name",
+        "rel",
         "role",
-        "title"
-    };
+        "rowspan",
+        "scope",
+        "size",
+        "span",
+        "src",
+        "style",
+        "summary",
+        "target",
+        "text",
+        "title",
+        "type",
+        "valign",
+        "vlink",
+        "width"
+    ];
+
+    private static readonly string[] UriAttributes =
+    [
+        "href",
+        "src"
+    ];
+
+    private static readonly string[] AllowedSchemes =
+    [
+        "cid",
+        "https",
+        "mailto",
+        "tel"
+    ];
 
     private static readonly HashSet<string> AnchorSchemes = new(StringComparer.OrdinalIgnoreCase)
     {
@@ -123,9 +147,18 @@ internal static partial class EmailHtmlSanitizer
 
     private static readonly HashSet<string> ImageSchemes = new(StringComparer.OrdinalIgnoreCase)
     {
-        "https",
-        "cid"
+        "cid",
+        "https"
     };
+
+    private static readonly HashSet<string> AllowedTargets = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "_blank",
+        "_parent",
+        "_self",
+        "_top"
+    };
+
     private static readonly string[] AllowedRelTokens =
     [
         "noopener",
@@ -135,689 +168,472 @@ internal static partial class EmailHtmlSanitizer
         "sponsored"
     ];
 
-    private static readonly HashSet<string> AlignmentValues = new(StringComparer.OrdinalIgnoreCase)
+    private static readonly string[] AllowedLinkRelTokenOrder =
+    [
+        "stylesheet",
+        "preconnect",
+        "dns-prefetch"
+    ];
+
+    private static readonly HashSet<string> AllowedLinkRelTokens = new(AllowedLinkRelTokenOrder, StringComparer.OrdinalIgnoreCase);
+
+    private static readonly HashSet<string> AllowedFontStylesheetHosts = new(StringComparer.OrdinalIgnoreCase)
     {
-        "baseline",
-        "bottom",
-        "center",
-        "justify",
-        "left",
-        "middle",
-        "right",
-        "top"
+        "fonts.googleapis.com"
     };
+
+    private static readonly HashSet<string> AllowedFontPreconnectHosts = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "fonts.googleapis.com",
+        "fonts.gstatic.com"
+    };
+
+    private static readonly HashSet<string> AllowedMetaNames = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "color-scheme",
+        "format-detection",
+        "supported-color-schemes",
+        "viewport",
+        "x-apple-disable-message-reformatting"
+    };
+
+    private static readonly HashSet<string> AllowedHttpEquivValues = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "content-type",
+        "x-ua-compatible"
+    };
+
+    private static readonly CssRuleType[] AllowedAtRules =
+    [
+        CssRuleType.Style,
+        CssRuleType.Media
+    ];
+
+    private static readonly string[] AdditionalEmailCssProperties =
+    [
+        "-ms-text-size-adjust",
+        "-webkit-text-size-adjust",
+        "font-size",
+        "mso-hide",
+        "mso-line-height-rule",
+        "mso-padding-alt",
+        "mso-table-lspace",
+        "mso-table-rspace",
+        "text-size-adjust"
+    ];
 
     public static string Sanitize(string html)
     {
-        var canonicalHtml = NormalizeLineEndings(RemoveUnsafeControlCharacters(DecodeHtmlEntitiesRepeatedly(html)));
-        var sanitized = new StringBuilder(canonicalHtml.Length);
+        var sanitizer = CreateSanitizer();
+        var sanitized = FullDocumentHintRegex().IsMatch(html)
+            ? sanitizer.SanitizeDocument(html)
+            : sanitizer.Sanitize(html);
 
-        for (var index = 0; index < canonicalHtml.Length; index++)
-        {
-            if (canonicalHtml[index] != '<')
-            {
-                AppendEncodedCharacter(sanitized, canonicalHtml[index]);
-                continue;
-            }
-
-            if (!TryReadTag(canonicalHtml, index, out var tag, out var nextIndex))
-            {
-                sanitized.Append("&lt;");
-                continue;
-            }
-
-            index = nextIndex - 1;
-
-            if (tag.Kind is HtmlTagKind.Comment or HtmlTagKind.Declaration)
-            {
-                continue;
-            }
-
-            if (DangerousContentElements.Contains(tag.Name))
-            {
-                if (!tag.IsClosing)
-                {
-                    index = FindDangerousElementEnd(canonicalHtml, tag.Name, nextIndex) - 1;
-                }
-
-                continue;
-            }
-
-            if (!AllowedElements.Contains(tag.Name))
-            {
-                continue;
-            }
-
-            if (tag.IsClosing)
-            {
-                if (!VoidElements.Contains(tag.Name))
-                {
-                    sanitized.Append("</").Append(tag.Name).Append('>');
-                }
-
-                continue;
-            }
-
-            sanitized.Append('<').Append(tag.Name);
-            AppendSanitizedAttributes(sanitized, tag.Name, tag.RawAttributes);
-            sanitized.Append('>');
-        }
-
-        return sanitized.ToString().Trim();
+        return sanitized.Trim();
     }
 
-    private static bool TryReadTag(string html, int startIndex, out HtmlTag tag, out int nextIndex)
+    private static HtmlSanitizer CreateSanitizer()
     {
-        tag = default;
-        nextIndex = startIndex + 1;
-
-        if (startIndex + 1 >= html.Length || html[startIndex] != '<')
+        var sanitizer = new HtmlSanitizer
         {
-            return false;
+            AllowCssCustomProperties = false,
+            AllowDataAttributes = false,
+            DisallowCssPropertyValue = DisallowedCssPropertyValueRegex,
+            KeepChildNodes = false
+        };
+
+        ReplaceAllowedValues(sanitizer.AllowedTags, AllowedTags);
+        ReplaceAllowedValues(sanitizer.AllowedAttributes, AllowedAttributes);
+        ReplaceAllowedValues(sanitizer.AllowedSchemes, AllowedSchemes);
+        ReplaceAllowedValues(sanitizer.UriAttributes, UriAttributes);
+        ReplaceAllowedValues(sanitizer.AllowedAtRules, AllowedAtRules);
+
+        foreach (var property in AdditionalEmailCssProperties)
+        {
+            sanitizer.AllowedCssProperties.Add(property);
         }
 
-        if (html.AsSpan(startIndex + 1).StartsWith("!--", StringComparison.Ordinal))
+        sanitizer.FilterUrl += (_, args) =>
         {
-            var commentEnd = html.IndexOf("-->", startIndex + 4, StringComparison.Ordinal);
-            nextIndex = commentEnd >= 0 ? commentEnd + 3 : html.Length;
-            tag = new HtmlTag(HtmlTagKind.Comment, string.Empty, false, string.Empty);
+            if (!IsSafeUrl(args.SanitizedUrl, AllowedSchemes, allowFragment: true))
+            {
+                args.SanitizedUrl = null;
+            }
+        };
+
+        sanitizer.PostProcessNode += (_, args) =>
+        {
+            if (args.Node is not IElement element)
+            {
+                return;
+            }
+
+            RemoveUnexpectedUriAttributes(element);
+            SanitizeMetaElement(element);
+            SanitizeLinkElement(element);
+            RemoveContextualAttributes(element);
+            HardenAnchor(element);
+        };
+
+        return sanitizer;
+    }
+
+    private static void ReplaceAllowedValues<T>(ISet<T> values, IEnumerable<T> allowedValues)
+    {
+        values.Clear();
+        foreach (var allowedValue in allowedValues)
+        {
+            values.Add(allowedValue);
+        }
+    }
+
+    private static void RemoveUnexpectedUriAttributes(IElement element)
+    {
+        var tagName = element.LocalName;
+
+        if (element.GetAttribute("href") is { } href &&
+            !IsExpectedHrefAttribute(tagName, href))
+        {
+            element.RemoveAttribute("href");
+        }
+
+        if (element.GetAttribute("src") is { } src &&
+            (!tagName.Equals("img", StringComparison.OrdinalIgnoreCase) ||
+             !IsSafeUrl(src, ImageSchemes, allowFragment: false)))
+        {
+            element.RemoveAttribute("src");
+        }
+    }
+
+    private static bool IsExpectedHrefAttribute(string tagName, string href) =>
+        tagName.Equals("a", StringComparison.OrdinalIgnoreCase)
+            ? IsSafeUrl(href, AnchorSchemes, allowFragment: true)
+            : tagName.Equals("link", StringComparison.OrdinalIgnoreCase) && IsSafeFontLinkHref(href, out _);
+
+    private static void SanitizeMetaElement(IElement element)
+    {
+        if (!element.LocalName.Equals("meta", StringComparison.OrdinalIgnoreCase))
+        {
+            return;
+        }
+
+        if (!TrySanitizeMetaElement(element))
+        {
+            RemoveElement(element);
+        }
+    }
+
+    private static bool TrySanitizeMetaElement(IElement element)
+    {
+        var charset = element.GetAttribute("charset");
+        var name = element.GetAttribute("name");
+        var httpEquiv = element.GetAttribute("http-equiv");
+        var content = element.GetAttribute("content");
+
+        if (charset is not null)
+        {
+            if (name is not null ||
+                httpEquiv is not null ||
+                !charset.Equals("utf-8", StringComparison.OrdinalIgnoreCase))
+            {
+                return false;
+            }
+
+            RemoveAttributesExcept(element, "charset");
+            element.SetAttribute("charset", "utf-8");
             return true;
         }
 
-        var index = startIndex + 1;
-        if (html[index] is '!' or '?')
+        if (name is not null)
         {
-            nextIndex = FindTagEnd(html, index + 1);
-            if (nextIndex < 0)
+            if (httpEquiv is not null)
             {
-                nextIndex = html.Length;
+                return false;
             }
 
-            tag = new HtmlTag(HtmlTagKind.Declaration, string.Empty, false, string.Empty);
+            name = name.Trim().ToLowerInvariant();
+            if (!AllowedMetaNames.Contains(name) || !IsSafeMetaNameContent(name, content))
+            {
+                return false;
+            }
+
+            RemoveAttributesExcept(element, "name", "content");
+            element.SetAttribute("name", name);
             return true;
         }
 
-        var isClosing = false;
-        if (html[index] == '/')
+        if (httpEquiv is not null)
         {
-            isClosing = true;
-            index++;
-        }
-
-        while (index < html.Length && char.IsWhiteSpace(html[index]))
-        {
-            index++;
-        }
-
-        if (index >= html.Length || !IsTagNameStart(html[index]))
-        {
-            return false;
-        }
-
-        var nameStart = index;
-        index++;
-        while (index < html.Length && IsTagNameCharacter(html[index]))
-        {
-            index++;
-        }
-
-        var tagName = html[nameStart..index].ToLowerInvariant();
-        nextIndex = FindTagEnd(html, index);
-        if (nextIndex <= index)
-        {
-            return false;
-        }
-
-        var rawAttributes = isClosing ? string.Empty : html[index..(nextIndex - 1)];
-        tag = new HtmlTag(HtmlTagKind.Element, tagName, isClosing, rawAttributes);
-        return true;
-    }
-
-    private static int FindTagEnd(string html, int startIndex)
-    {
-        char? quote = null;
-
-        for (var index = startIndex; index < html.Length; index++)
-        {
-            var character = html[index];
-            if (quote is not null)
+            httpEquiv = httpEquiv.Trim().ToLowerInvariant();
+            if (!AllowedHttpEquivValues.Contains(httpEquiv) || !IsSafeHttpEquivContent(httpEquiv, content))
             {
-                if (character == quote)
-                {
-                    quote = null;
-                }
-
-                continue;
+                return false;
             }
 
-            if (character is '"' or '\'')
-            {
-                quote = character;
-                continue;
-            }
-
-            if (character == '>')
-            {
-                return index + 1;
-            }
-        }
-
-        return -1;
-    }
-
-    private static int FindDangerousElementEnd(string html, string tagName, int startIndex)
-    {
-        var pattern = "</" + tagName;
-        var closingStart = html.IndexOf(pattern, startIndex, StringComparison.OrdinalIgnoreCase);
-        if (closingStart < 0)
-        {
-            return html.Length;
-        }
-
-        var closingEnd = FindTagEnd(html, closingStart + 2 + tagName.Length);
-        return closingEnd > closingStart ? closingEnd : html.Length;
-    }
-
-    private static void AppendSanitizedAttributes(StringBuilder sanitized, string tagName, string rawAttributes)
-    {
-        var attributes = ParseAttributes(rawAttributes);
-        var emittedAttributes = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        var sanitizedAttributes = new List<HtmlAttribute>();
-        var relTokens = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        var opensInNewWindow = false;
-
-        foreach (var attribute in attributes)
-        {
-            if (!TrySanitizeAttribute(tagName, attribute.Name, attribute.Value, out var sanitizedName, out var sanitizedValue))
-            {
-                continue;
-            }
-
-            if (!emittedAttributes.Add(sanitizedName))
-            {
-                continue;
-            }
-
-            if (sanitizedName.Equals("target", StringComparison.OrdinalIgnoreCase) &&
-                sanitizedValue.Equals("_blank", StringComparison.OrdinalIgnoreCase))
-            {
-                opensInNewWindow = true;
-            }
-
-            if (tagName.Equals("a", StringComparison.OrdinalIgnoreCase) &&
-                sanitizedName.Equals("rel", StringComparison.OrdinalIgnoreCase))
-            {
-                AddRelTokens(relTokens, sanitizedValue);
-                continue;
-            }
-
-            sanitizedAttributes.Add(new HtmlAttribute(sanitizedName, sanitizedValue));
-        }
-
-        if (tagName.Equals("a", StringComparison.OrdinalIgnoreCase))
-        {
-            if (opensInNewWindow)
-            {
-                relTokens.Add("noopener");
-                relTokens.Add("noreferrer");
-            }
-
-            if (relTokens.Count > 0)
-            {
-                sanitizedAttributes.Add(new HtmlAttribute("rel", FormatRelTokens(relTokens)));
-            }
-        }
-
-        foreach (var attribute in sanitizedAttributes)
-        {
-            sanitized.Append(' ')
-                .Append(attribute.Name)
-                .Append("=\"")
-                .Append(HtmlEncodeAttribute(attribute.Value))
-                .Append('"');
-        }
-    }
-
-    private static List<HtmlAttribute> ParseAttributes(string rawAttributes)
-    {
-        var attributes = new List<HtmlAttribute>();
-        var index = 0;
-
-        while (index < rawAttributes.Length)
-        {
-            while (index < rawAttributes.Length && (char.IsWhiteSpace(rawAttributes[index]) || rawAttributes[index] == '/'))
-            {
-                index++;
-            }
-
-            if (index >= rawAttributes.Length)
-            {
-                break;
-            }
-
-            if (!IsAttributeNameStart(rawAttributes[index]))
-            {
-                index++;
-                continue;
-            }
-
-            var nameStart = index;
-            index++;
-            while (index < rawAttributes.Length && IsAttributeNameCharacter(rawAttributes[index]))
-            {
-                index++;
-            }
-
-            var attributeName = rawAttributes[nameStart..index].ToLowerInvariant();
-
-            while (index < rawAttributes.Length && char.IsWhiteSpace(rawAttributes[index]))
-            {
-                index++;
-            }
-
-            var attributeValue = string.Empty;
-            if (index < rawAttributes.Length && rawAttributes[index] == '=')
-            {
-                index++;
-                while (index < rawAttributes.Length && char.IsWhiteSpace(rawAttributes[index]))
-                {
-                    index++;
-                }
-
-                if (index < rawAttributes.Length && rawAttributes[index] is '"' or '\'')
-                {
-                    var quote = rawAttributes[index++];
-                    var valueStart = index;
-                    while (index < rawAttributes.Length && rawAttributes[index] != quote)
-                    {
-                        index++;
-                    }
-
-                    attributeValue = rawAttributes[valueStart..index];
-                    if (index < rawAttributes.Length)
-                    {
-                        index++;
-                    }
-                }
-                else
-                {
-                    var valueStart = index;
-                    while (index < rawAttributes.Length &&
-                           !char.IsWhiteSpace(rawAttributes[index]) &&
-                           rawAttributes[index] is not '/' and not '>')
-                    {
-                        index++;
-                    }
-
-                    attributeValue = rawAttributes[valueStart..index];
-                }
-            }
-
-            attributes.Add(new HtmlAttribute(attributeName, attributeValue));
-        }
-
-        return attributes;
-    }
-
-    private static bool TrySanitizeAttribute(
-        string tagName,
-        string attributeName,
-        string attributeValue,
-        out string sanitizedName,
-        out string sanitizedValue)
-    {
-        sanitizedName = attributeName.ToLowerInvariant();
-        sanitizedValue = DecodeHtmlEntitiesRepeatedly(attributeValue).Trim();
-
-        if (sanitizedName.Length == 0 ||
-            sanitizedName.StartsWith("on", StringComparison.OrdinalIgnoreCase) ||
-            sanitizedName.StartsWith("xmlns", StringComparison.OrdinalIgnoreCase) ||
-            sanitizedName is "style" or "srcdoc" or "formaction" or "action" or "background" or "dynsrc" or "lowsrc" or "srcset")
-        {
-            return false;
-        }
-
-        sanitizedValue = RemoveUnsafeControlCharacters(sanitizedValue);
-        if (sanitizedValue.Length > 2048)
-        {
-            return false;
-        }
-
-        if (sanitizedName.StartsWith("aria-", StringComparison.OrdinalIgnoreCase))
-        {
-            return IsSafeTextAttributeValue(sanitizedValue);
-        }
-
-        if (GlobalTextAttributes.Contains(sanitizedName))
-        {
-            return sanitizedName switch
-            {
-                "dir" => IsOneOf(sanitizedValue, "ltr", "rtl", "auto"),
-                "id" or "class" => IsSafeTokenList(sanitizedValue),
-                _ => IsSafeTextAttributeValue(sanitizedValue)
-            };
-        }
-
-        if (tagName.Equals("a", StringComparison.OrdinalIgnoreCase))
-        {
-            return sanitizedName switch
-            {
-                "href" => TrySanitizeUrl(sanitizedValue, AnchorSchemes, allowFragment: true, out sanitizedValue),
-                "target" => TrySanitizeTarget(sanitizedValue, out sanitizedValue),
-                "rel" => TrySanitizeRel(sanitizedValue, out sanitizedValue),
-                "name" => IsSafeTokenList(sanitizedValue),
-                _ => false
-            };
-        }
-
-        if (tagName.Equals("img", StringComparison.OrdinalIgnoreCase))
-        {
-            return sanitizedName switch
-            {
-                "src" => TrySanitizeUrl(sanitizedValue, ImageSchemes, allowFragment: false, out sanitizedValue),
-                "alt" => IsSafeTextAttributeValue(sanitizedValue),
-                "height" or "width" => IsSafeDimension(sanitizedValue),
-                "title" => IsSafeTextAttributeValue(sanitizedValue),
-                _ => false
-            };
-        }
-
-        if (tagName.Equals("table", StringComparison.OrdinalIgnoreCase))
-        {
-            return sanitizedName switch
-            {
-                "align" => AlignmentValues.Contains(sanitizedValue),
-                "bgcolor" => IsSafeColor(sanitizedValue),
-                "border" or "cellpadding" or "cellspacing" or "height" or "width" => IsSafeDimension(sanitizedValue),
-                "summary" => IsSafeTextAttributeValue(sanitizedValue),
-                _ => false
-            };
-        }
-
-        if (tagName is "td" or "th")
-        {
-            return sanitizedName switch
-            {
-                "align" or "valign" => AlignmentValues.Contains(sanitizedValue),
-                "bgcolor" => IsSafeColor(sanitizedValue),
-                "colspan" or "rowspan" or "height" or "width" => IsSafeDimension(sanitizedValue),
-                "scope" => IsOneOf(sanitizedValue, "col", "colgroup", "row", "rowgroup"),
-                _ => false
-            };
-        }
-
-        if (tagName.Equals("tr", StringComparison.OrdinalIgnoreCase))
-        {
-            return sanitizedName switch
-            {
-                "align" or "valign" => AlignmentValues.Contains(sanitizedValue),
-                "bgcolor" => IsSafeColor(sanitizedValue),
-                _ => false
-            };
-        }
-
-        if (tagName is "col" or "colgroup")
-        {
-            return sanitizedName switch
-            {
-                "span" or "width" => IsSafeDimension(sanitizedValue),
-                _ => false
-            };
-        }
-
-        if (tagName.Equals("font", StringComparison.OrdinalIgnoreCase))
-        {
-            return sanitizedName switch
-            {
-                "color" => IsSafeColor(sanitizedValue),
-                "face" => IsSafeTextAttributeValue(sanitizedValue),
-                "size" => FontSizeRegex().IsMatch(sanitizedValue),
-                _ => false
-            };
-        }
-
-        if (tagName.Equals("body", StringComparison.OrdinalIgnoreCase))
-        {
-            return sanitizedName switch
-            {
-                "alink" or "bgcolor" or "link" or "text" or "vlink" => IsSafeColor(sanitizedValue),
-                _ => false
-            };
+            RemoveAttributesExcept(element, "http-equiv", "content");
+            element.SetAttribute("http-equiv", httpEquiv);
+            return true;
         }
 
         return false;
     }
 
-    private static bool TrySanitizeUrl(
-        string value,
-        HashSet<string> allowedSchemes,
-        bool allowFragment,
-        out string sanitizedValue)
+    private static bool IsSafeMetaNameContent(string name, string? content) =>
+        name switch
+        {
+            "color-scheme" or "supported-color-schemes" =>
+                content is not null && ColorSchemeMetaContentRegex().IsMatch(content),
+            "format-detection" =>
+                content is not null && FormatDetectionMetaContentRegex().IsMatch(content),
+            "viewport" =>
+                content is not null && ViewportMetaContentRegex().IsMatch(content),
+            "x-apple-disable-message-reformatting" =>
+                content is null || SafeShortMetaContentRegex().IsMatch(content),
+            _ => false
+        };
+
+    private static bool IsSafeHttpEquivContent(string httpEquiv, string? content) =>
+        httpEquiv switch
+        {
+            "content-type" => content is not null && ContentTypeMetaContentRegex().IsMatch(content),
+            "x-ua-compatible" => content is not null && XUaCompatibleMetaContentRegex().IsMatch(content),
+            _ => false
+        };
+
+    private static void SanitizeLinkElement(IElement element)
     {
-        sanitizedValue = value.Trim();
-
-        if (sanitizedValue.Length == 0 ||
-            sanitizedValue.StartsWith("//", StringComparison.Ordinal) ||
-            sanitizedValue.StartsWith("/", StringComparison.Ordinal))
+        if (!element.LocalName.Equals("link", StringComparison.OrdinalIgnoreCase))
         {
-            return false;
+            return;
         }
 
-        if (allowFragment && sanitizedValue.StartsWith("#", StringComparison.Ordinal))
+        if (!TrySanitizeLinkElement(element))
         {
-            return FragmentRegex().IsMatch(sanitizedValue);
+            RemoveElement(element);
         }
-
-        var decodedUrl = DecodePercentEscapesRepeatedly(DecodeHtmlEntitiesRepeatedly(sanitizedValue));
-        if (decodedUrl.Any(IsUnsafeUrlCharacter))
-        {
-            return false;
-        }
-
-        var rawSchemeMatch = RawSchemeRegex().Match(sanitizedValue);
-        var canonicalSchemeMatch = RawSchemeRegex().Match(CanonicalizeUrlForSchemeCheck(decodedUrl));
-
-        if (!rawSchemeMatch.Success || !canonicalSchemeMatch.Success)
-        {
-            return false;
-        }
-
-        var rawScheme = rawSchemeMatch.Groups["scheme"].Value;
-        var canonicalScheme = canonicalSchemeMatch.Groups["scheme"].Value;
-        return rawScheme.Equals(canonicalScheme, StringComparison.OrdinalIgnoreCase) &&
-               allowedSchemes.Contains(canonicalScheme);
     }
 
-    private static string CanonicalizeUrlForSchemeCheck(string value)
+    private static bool TrySanitizeLinkElement(IElement element)
     {
-        var canonical = new StringBuilder(value.Length);
-
-        foreach (var character in value)
+        if (!IsSafeFontLinkHref(element.GetAttribute("href"), out var hrefUri))
         {
-            if (!char.IsWhiteSpace(character) && character is not '\u0000' and not '\u200B' and not '\uFEFF')
+            return false;
+        }
+
+        var relTokens = GetAllowedLinkRelTokens(element.GetAttribute("rel"));
+        if (relTokens.Count == 0)
+        {
+            return false;
+        }
+
+        var isStylesheet = relTokens.Contains("stylesheet");
+        var allowedHosts = isStylesheet ? AllowedFontStylesheetHosts : AllowedFontPreconnectHosts;
+        if (!allowedHosts.Contains(hrefUri.Host))
+        {
+            return false;
+        }
+
+        if (element.GetAttribute("type") is { } type &&
+            !type.Equals("text/css", StringComparison.OrdinalIgnoreCase))
+        {
+            element.RemoveAttribute("type");
+        }
+
+        if (element.GetAttribute("media") is { } media &&
+            !MediaAttributeRegex().IsMatch(media))
+        {
+            element.RemoveAttribute("media");
+        }
+
+        if (element.GetAttribute("crossorigin") is { } crossorigin)
+        {
+            if (crossorigin.Length == 0 ||
+                crossorigin.Equals("anonymous", StringComparison.OrdinalIgnoreCase))
             {
-                canonical.Append(character);
+                element.SetAttribute("crossorigin", "anonymous");
+            }
+            else
+            {
+                element.RemoveAttribute("crossorigin");
             }
         }
 
-        return canonical.ToString();
+        RemoveAttributesExcept(element, "href", "rel", "media", "type", "crossorigin");
+        element.SetAttribute("rel", string.Join(' ', AllowedLinkRelTokenOrder.Where(relTokens.Contains)));
+        return true;
     }
 
-    private static string DecodePercentEscapesRepeatedly(string value)
+    private static HashSet<string> GetAllowedLinkRelTokens(string? rel)
     {
-        var current = value;
-        for (var pass = 0; pass < MaxDecodePasses; pass++)
+        var relTokens = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var token in (rel ?? string.Empty).Split(' ', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
         {
-            var decoded = PercentEncodingRegex().Replace(current, match =>
-                ((char)Convert.ToByte(match.Groups["hex"].Value, 16)).ToString());
-
-            if (decoded == current)
+            if (!AllowedLinkRelTokens.Contains(token))
             {
-                return current;
+                relTokens.Clear();
+                return relTokens;
             }
 
-            current = decoded;
+            relTokens.Add(token);
         }
 
-        return current;
+        return relTokens;
     }
 
-    private static bool TrySanitizeTarget(string value, out string sanitizedValue)
+    private static bool IsSafeFontLinkHref(string? href, out Uri hrefUri)
     {
-        sanitizedValue = value.ToLowerInvariant();
-        return IsOneOf(sanitizedValue, "_blank", "_self", "_parent", "_top");
+        hrefUri = null!;
+        if (!IsSafeUrl(href, HttpsSchemes, allowFragment: false) ||
+            !Uri.TryCreate(href!.Trim(), UriKind.Absolute, out var parsedUri) ||
+            parsedUri is null)
+        {
+            return false;
+        }
+
+        hrefUri = parsedUri;
+        return true;
     }
 
-    private static bool TrySanitizeRel(string value, out string sanitizedValue)
+    private static void RemoveAttributesExcept(IElement element, params string[] allowedAttributes)
     {
-        var safeTokens = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        AddRelTokens(safeTokens, value);
-
-        sanitizedValue = FormatRelTokens(safeTokens);
-        return sanitizedValue.Length > 0;
+        var allowed = new HashSet<string>(allowedAttributes, StringComparer.OrdinalIgnoreCase);
+        foreach (var attribute in element.Attributes.ToArray())
+        {
+            if (!allowed.Contains(attribute.Name))
+            {
+                element.RemoveAttribute(attribute.Name);
+            }
+        }
     }
 
-    private static void AddRelTokens(HashSet<string> relTokens, string value)
+    private static void RemoveContextualAttributes(IElement element)
     {
-        foreach (var token in value.Split(' ', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+        var tagName = element.LocalName;
+
+        if (!tagName.Equals("meta", StringComparison.OrdinalIgnoreCase))
+        {
+            element.RemoveAttribute("charset");
+            element.RemoveAttribute("content");
+            element.RemoveAttribute("http-equiv");
+        }
+
+        if (!tagName.Equals("link", StringComparison.OrdinalIgnoreCase))
+        {
+            element.RemoveAttribute("crossorigin");
+        }
+
+        if (!tagName.Equals("a", StringComparison.OrdinalIgnoreCase) &&
+            !tagName.Equals("link", StringComparison.OrdinalIgnoreCase))
+        {
+            element.RemoveAttribute("rel");
+        }
+    }
+
+    private static void RemoveElement(IElement element)
+    {
+        element.Parent?.RemoveChild(element);
+    }
+
+    private static void HardenAnchor(IElement element)
+    {
+        if (!element.LocalName.Equals("a", StringComparison.OrdinalIgnoreCase))
+        {
+            return;
+        }
+
+        var target = element.GetAttribute("target");
+        if (target is not null && !AllowedTargets.Contains(target))
+        {
+            element.RemoveAttribute("target");
+            target = null;
+        }
+
+        if (target is not null)
+        {
+            target = target.ToLowerInvariant();
+            element.SetAttribute("target", target);
+        }
+
+        var relTokens = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var token in (element.GetAttribute("rel") ?? string.Empty)
+                     .Split(' ', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
         {
             if (AllowedRelTokens.Contains(token, StringComparer.OrdinalIgnoreCase))
             {
                 relTokens.Add(token);
             }
         }
-    }
 
-    private static string FormatRelTokens(HashSet<string> relTokens) =>
-        string.Join(' ', AllowedRelTokens.Where(relTokens.Contains));
-
-    private static bool IsOneOf(string value, params string[] allowedValues) =>
-        allowedValues.Any(allowedValue => value.Equals(allowedValue, StringComparison.OrdinalIgnoreCase));
-
-    private static bool IsSafeTextAttributeValue(string value) =>
-        value.Length <= 512 &&
-        value.IndexOf('<') < 0 &&
-        value.IndexOf('>') < 0 &&
-        value.IndexOf('\u0000') < 0;
-
-    private static bool IsSafeTokenList(string value) =>
-        value.Length <= 256 && TokenListRegex().IsMatch(value);
-
-    private static bool IsSafeDimension(string value) =>
-        DimensionRegex().IsMatch(value);
-
-    private static bool IsSafeColor(string value) =>
-        ColorRegex().IsMatch(value);
-
-    private static bool IsUnsafeUrlCharacter(char character) =>
-        char.IsControl(character) ||
-        char.IsWhiteSpace(character) ||
-        character is '<' or '>' or '"' or '\'';
-
-    private static string DecodeHtmlEntitiesRepeatedly(string value)
-    {
-        var current = value;
-        for (var pass = 0; pass < MaxDecodePasses; pass++)
+        if (target is "_blank")
         {
-            var decoded = WebUtility.HtmlDecode(current);
-            if (decoded == current)
-            {
-                return current;
-            }
-
-            current = decoded;
+            relTokens.Add("noopener");
+            relTokens.Add("noreferrer");
         }
 
-        return current;
-    }
-
-    private static string RemoveUnsafeControlCharacters(string value)
-    {
-        var sanitized = new StringBuilder(value.Length);
-
-        foreach (var character in value)
+        if (relTokens.Count == 0)
         {
-            if (character is '\t' or '\n' or '\r' || !char.IsControl(character))
-            {
-                sanitized.Append(character);
-            }
+            element.RemoveAttribute("rel");
+            return;
         }
 
-        return sanitized.ToString();
+        element.SetAttribute("rel", string.Join(' ', AllowedRelTokens.Where(relTokens.Contains)));
     }
 
-    private static string NormalizeLineEndings(string value) =>
-        value.Replace("\r\n", "\n").Replace('\r', '\n');
-
-    private static bool IsTagNameStart(char character) =>
-        character is >= 'A' and <= 'Z' or >= 'a' and <= 'z';
-
-    private static bool IsTagNameCharacter(char character) =>
-        IsTagNameStart(character) || character is >= '0' and <= '9';
-
-    private static bool IsAttributeNameStart(char character) =>
-        IsTagNameStart(character) || character == ':';
-
-    private static bool IsAttributeNameCharacter(char character) =>
-        IsTagNameStart(character) || character is >= '0' and <= '9' or '-' or '_' or ':';
-
-    private static void AppendEncodedCharacter(StringBuilder builder, char character)
+    private static bool IsSafeUrl(string? value, IEnumerable<string> allowedSchemes, bool allowFragment)
     {
-        switch (character)
+        if (string.IsNullOrWhiteSpace(value))
         {
-            case '<':
-                builder.Append("&lt;");
-                break;
-            case '>':
-                builder.Append("&gt;");
-                break;
-            case '&':
-                builder.Append("&amp;");
-                break;
-            case '"':
-                builder.Append("&quot;");
-                break;
-            case '\'':
-                builder.Append("&#39;");
-                break;
-            default:
-                builder.Append(character);
-                break;
+            return false;
         }
+
+        var sanitizedValue = value.Trim();
+        if (sanitizedValue.StartsWith("//", StringComparison.Ordinal) ||
+            sanitizedValue.StartsWith("/", StringComparison.Ordinal) ||
+            UnsafeUrlCharacterRegex().IsMatch(sanitizedValue) ||
+            UnsafePercentEncodingRegex().IsMatch(sanitizedValue))
+        {
+            return false;
+        }
+
+        if (allowFragment && FragmentRegex().IsMatch(sanitizedValue))
+        {
+            return true;
+        }
+
+        return Uri.TryCreate(sanitizedValue, UriKind.Absolute, out var uri) &&
+               allowedSchemes.Contains(uri.Scheme, StringComparer.OrdinalIgnoreCase);
     }
 
-    private static string HtmlEncodeAttribute(string value) =>
-        WebUtility.HtmlEncode(value).Replace("'", "&#39;", StringComparison.Ordinal);
+    [GeneratedRegex(@"<(?:!doctype|html|head|body)\b", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
+    private static partial Regex FullDocumentHintRegex();
 
-    [GeneratedRegex(@"^(?<scheme>[a-z][a-z0-9+.-]*):", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
-    private static partial Regex RawSchemeRegex();
+    [GeneratedRegex(@"[\u0000-\u001F\u007F\s<>""']")]
+    private static partial Regex UnsafeUrlCharacterRegex();
 
-    [GeneratedRegex(@"%u?0*(?<hex>[0-9a-f]{2})", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
-    private static partial Regex PercentEncodingRegex();
+    [GeneratedRegex(@"%(?:0[0-9a-f]|1[0-9a-f]|20|22|27|3c|3e|7f)", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
+    private static partial Regex UnsafePercentEncodingRegex();
 
     [GeneratedRegex(@"^#[A-Za-z][A-Za-z0-9_-]{0,63}$", RegexOptions.CultureInvariant)]
     private static partial Regex FragmentRegex();
 
-    [GeneratedRegex(@"^[A-Za-z0-9 _.,-]{1,256}$", RegexOptions.CultureInvariant)]
-    private static partial Regex TokenListRegex();
+    [GeneratedRegex(@"^(?:light|dark|only light)(?:\s+(?:light|dark))*$", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
+    private static partial Regex ColorSchemeMetaContentRegex();
 
-    [GeneratedRegex(@"^\d{1,4}%?$", RegexOptions.CultureInvariant)]
-    private static partial Regex DimensionRegex();
+    [GeneratedRegex(@"^[A-Za-z-]+=(?:yes|no)(?:\s*,\s*[A-Za-z-]+=(?:yes|no))*$", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
+    private static partial Regex FormatDetectionMetaContentRegex();
 
-    [GeneratedRegex(@"^(#[0-9a-f]{3}(?:[0-9a-f]{3})?|[a-z]{3,20})$", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
-    private static partial Regex ColorRegex();
+    [GeneratedRegex(@"^[A-Za-z0-9\s,=._:%+-]{1,256}$", RegexOptions.CultureInvariant)]
+    private static partial Regex ViewportMetaContentRegex();
 
-    [GeneratedRegex(@"^[+-]?\d{1,2}$", RegexOptions.CultureInvariant)]
-    private static partial Regex FontSizeRegex();
+    [GeneratedRegex(@"^[A-Za-z0-9\s,=._:%+-]{0,128}$", RegexOptions.CultureInvariant)]
+    private static partial Regex SafeShortMetaContentRegex();
 
-    private readonly record struct HtmlTag(HtmlTagKind Kind, string Name, bool IsClosing, string RawAttributes);
+    [GeneratedRegex(@"^text/html\s*;\s*charset\s*=\s*utf-8$", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
+    private static partial Regex ContentTypeMetaContentRegex();
 
-    private readonly record struct HtmlAttribute(string Name, string Value);
+    [GeneratedRegex(@"^ie=edge$", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
+    private static partial Regex XUaCompatibleMetaContentRegex();
 
-    private enum HtmlTagKind
-    {
-        Element,
-        Comment,
-        Declaration
-    }
+    [GeneratedRegex(@"^[A-Za-z0-9\s,=._:%()+-]{1,128}$", RegexOptions.CultureInvariant)]
+    private static partial Regex MediaAttributeRegex();
 }

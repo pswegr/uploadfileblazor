@@ -20,9 +20,19 @@ public sealed class UploadedFileProcessorTests
         var processed = await ProcessHtmlAsync(html);
 
         Assert.True(processed.WasHtml, "HTML extension should mark the upload as HTML.");
-        AssertContains("<h1 id=\"hero\" class=\"primary-title\">Hi &amp; welcome</h1>", processed.Text);
-        AssertContains("<p>Hello <strong>{{FirstName}}</strong><br><a href=\"https://example.com/welcome?x=1&amp;y=2\" target=\"_blank\" rel=\"noopener noreferrer\">Start</a></p>", processed.Text);
-        AssertContains("<table width=\"100%\"><tr><td align=\"center\">Body</td></tr></table>", processed.Text);
+        AssertContains("<h1", processed.Text);
+        AssertContains("id=\"hero\"", processed.Text);
+        AssertContains("class=\"primary-title\"", processed.Text);
+        AssertContains("Hi &amp; welcome", processed.Text);
+        AssertContains("style=", processed.Text);
+        AssertContains("color:", processed.Text);
+        AssertContains("Hello <strong>{{FirstName}}</strong>", processed.Text);
+        AssertContains("href=\"https://example.com/welcome?x=1&amp;y=2\"", processed.Text);
+        AssertContains("target=\"_blank\"", processed.Text);
+        AssertContains("rel=\"noopener noreferrer\"", processed.Text);
+        AssertContains("width=\"100%\"", processed.Text);
+        AssertContains("align=\"center\"", processed.Text);
+        AssertDoesNotContain("onclick", processed.Text);
         AssertNoExecutableHtml(processed.Text);
     }
 
@@ -109,7 +119,7 @@ public sealed class UploadedFileProcessorTests
     }
 
     [Fact]
-    public async Task StripsCssAndStyleAttackCorpus()
+    public async Task SanitizesCssAndStyleAttackCorpus()
     {
         var attacks = new[]
         {
@@ -124,8 +134,92 @@ public sealed class UploadedFileProcessorTests
         {
             var processed = await ProcessHtmlAsync(attack);
             AssertNoExecutableHtml(processed.Text);
-            AssertDoesNotContain("style=", processed.Text);
+            AssertDoesNotContain("javascript:", processed.Text);
+            AssertDoesNotContain("vbscript:", processed.Text);
+            AssertDoesNotContain("data:text/html", processed.Text);
+            AssertDoesNotContain("expression(", processed.Text);
+            AssertDoesNotContain("-moz-binding", processed.Text);
         }
+    }
+
+    [Fact]
+    public async Task PreservesSafeStyleTagsAndInlineStyleAttributes()
+    {
+        const string html =
+            "<!doctype html><html><head>" +
+            "<style>p{color:#123456;margin:0}@media screen and (max-width:600px){.hero{font-size:20px}}</style>" +
+            "</head><body>" +
+            "<p class=\"hero\" style=\"color:red;margin:0;mso-line-height-rule:exactly\">Safe</p>" +
+            "</body></html>";
+
+        var processed = await ProcessHtmlAsync(html);
+
+        AssertContains("<style", processed.Text);
+        AssertContains("</style>", processed.Text);
+        AssertContains("color:", processed.Text);
+        AssertContains("margin:", processed.Text);
+        AssertContains("@media", processed.Text);
+        AssertContains("font-size:", processed.Text);
+        AssertContains("style=", processed.Text);
+        AssertContains("mso-line-height-rule", processed.Text);
+        AssertNoExecutableHtml(processed.Text);
+    }
+
+    [Fact]
+    public async Task PreservesSafeEmailFontLinkAndMetaTags()
+    {
+        const string html =
+            "<!doctype html><html><head>" +
+            "<meta charset=\"UTF-8\">" +
+            "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\">" +
+            "<meta name=\"x-apple-disable-message-reformatting\">" +
+            "<meta name=\"format-detection\" content=\"telephone=no, date=no, address=no, email=no\">" +
+            "<meta name=\"color-scheme\" content=\"light dark\">" +
+            "<link rel=\"preconnect\" href=\"https://fonts.gstatic.com\" crossorigin>" +
+            "<link rel=\"stylesheet\" href=\"https://fonts.googleapis.com/css2?family=Inter:wght@400;700&amp;display=swap\" media=\"screen\">" +
+            "</head><body><p style=\"font-family:Inter, Arial\">Safe</p></body></html>";
+
+        var processed = await ProcessHtmlAsync(html);
+
+        AssertContains("<meta", processed.Text);
+        AssertContains("charset=\"utf-8\"", processed.Text);
+        AssertContains("name=\"viewport\"", processed.Text);
+        AssertContains("width=device-width", processed.Text);
+        AssertContains("name=\"x-apple-disable-message-reformatting\"", processed.Text);
+        AssertContains("name=\"format-detection\"", processed.Text);
+        AssertContains("name=\"color-scheme\"", processed.Text);
+        AssertContains("<link", processed.Text);
+        AssertContains("rel=\"preconnect\"", processed.Text);
+        AssertContains("href=\"https://fonts.gstatic.com\"", processed.Text);
+        AssertContains("crossorigin=\"anonymous\"", processed.Text);
+        AssertContains("rel=\"stylesheet\"", processed.Text);
+        AssertContains("href=\"https://fonts.googleapis.com/css2?family=Inter:wght@400;700&amp;display=swap\"", processed.Text);
+        AssertContains("media=\"screen\"", processed.Text);
+        AssertNoExecutableHtml(processed.Text);
+    }
+
+    [Fact]
+    public async Task StripsDangerousMetaAndExternalLinkTags()
+    {
+        const string html =
+            "<!doctype html><html><head>" +
+            "<meta http-equiv=\"refresh\" content=\"0;url=javascript:alert(1)\">" +
+            "<meta name=\"viewport\" content=\"width=device-width;javascript:alert(1)\">" +
+            "<link rel=\"stylesheet\" href=\"javascript:alert(1)\">" +
+            "<link rel=\"stylesheet\" href=\"http://fonts.googleapis.com/css2?family=Inter\">" +
+            "<link rel=\"stylesheet\" href=\"https://evil.example/email.css\">" +
+            "<link rel=\"preload\" href=\"https://fonts.googleapis.com/css2?family=Inter\">" +
+            "</head><body><p>Safe</p></body></html>";
+
+        var processed = await ProcessHtmlAsync(html);
+
+        AssertDoesNotContain("<meta", processed.Text);
+        AssertDoesNotContain("<link", processed.Text);
+        AssertDoesNotContain("http-equiv", processed.Text);
+        AssertDoesNotContain("refresh", processed.Text);
+        AssertDoesNotContain("evil.example", processed.Text);
+        AssertDoesNotContain("fonts.googleapis.com", processed.Text);
+        AssertNoExecutableHtml(processed.Text);
     }
 
     [Fact]
@@ -167,8 +261,12 @@ public sealed class UploadedFileProcessorTests
         AssertContains("href=\"mailto:support@example.com\"", processed.Text);
         AssertContains("href=\"tel:+48123456789\"", processed.Text);
         AssertContains("href=\"#intro\"", processed.Text);
-        AssertContains("<img src=\"https://example.com/logo.png\" width=\"200\" height=\"100\" alt=\"Logo\">", processed.Text);
-        AssertContains("<img src=\"cid:logo-image\" alt=\"Inline logo\">", processed.Text);
+        AssertContains("src=\"https://example.com/logo.png\"", processed.Text);
+        AssertContains("width=\"200\"", processed.Text);
+        AssertContains("height=\"100\"", processed.Text);
+        AssertContains("alt=\"Logo\"", processed.Text);
+        AssertContains("src=\"cid:logo-image\"", processed.Text);
+        AssertContains("alt=\"Inline logo\"", processed.Text);
         AssertNoExecutableHtml(processed.Text);
     }
 
@@ -178,7 +276,8 @@ public sealed class UploadedFileProcessorTests
         var processed = await ProcessHtmlAsync(
             "<a href=\"https://example.com\" target=\"_blank\" rel=\"nofollow opener\">Open</a>");
 
-        AssertContains("target=\"_blank\" rel=\"noopener noreferrer nofollow\"", processed.Text);
+        AssertContains("target=\"_blank\"", processed.Text);
+        AssertContains("rel=\"noopener noreferrer nofollow\"", processed.Text);
         AssertNoExecutableHtml(processed.Text);
     }
 
@@ -247,8 +346,6 @@ public sealed class UploadedFileProcessorTests
         {
             "<script",
             "</script",
-            "<style",
-            "</style",
             "<iframe",
             "<object",
             "<embed",
@@ -258,16 +355,18 @@ public sealed class UploadedFileProcessorTests
             "<input",
             "<button",
             "<textarea",
-            "<meta",
-            "<link",
             "<base",
             "srcdoc",
             "formaction",
             "xlink:href",
+            "http-equiv=\"refresh",
+            "@import",
             "javascript:",
             "vbscript:",
             "data:",
             "expression(",
+            "-moz-binding",
+            "behavior:",
             "url(javascript:"
         };
 
@@ -277,7 +376,6 @@ public sealed class UploadedFileProcessorTests
         }
 
         AssertDoesNotMatch("<[^>]+\\son[a-z0-9_:-]*\\s*=", html);
-        AssertDoesNotMatch("<[^>]+\\sstyle\\s*=", html);
     }
 
     private static void AssertContains(string expectedFragment, string actual) =>
