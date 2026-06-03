@@ -9,7 +9,7 @@ namespace UploadFileBlazor.Tests;
 public sealed class UploadedFileProcessorTests
 {
     [Fact]
-    public async Task SanitizesCommonEmailMarkup()
+    public async Task SanitizesHtmlWithDefaultHtmlSanitizerPolicy()
     {
         const string html =
             "<h1 id=\"hero\" class=\"primary-title\" onclick=\"evil()\">Hi &amp; welcome</h1>" +
@@ -21,19 +21,19 @@ public sealed class UploadedFileProcessorTests
 
         Assert.True(processed.WasHtml, "HTML extension should mark the upload as HTML.");
         AssertContains("<h1", processed.Text);
-        AssertContains("id=\"hero\"", processed.Text);
-        AssertContains("class=\"primary-title\"", processed.Text);
+        AssertDoesNotContain("id=\"hero\"", processed.Text);
+        AssertDoesNotContain("class=\"primary-title\"", processed.Text);
         AssertContains("Hi &amp; welcome", processed.Text);
         AssertContains("style=", processed.Text);
         AssertContains("color:", processed.Text);
         AssertContains("Hello <strong>{{FirstName}}</strong>", processed.Text);
         AssertContains("href=\"https://example.com/welcome?x=1&amp;y=2\"", processed.Text);
         AssertContains("target=\"_blank\"", processed.Text);
-        AssertContains("rel=\"noopener noreferrer\"", processed.Text);
+        AssertContains("rel=\"noopener external\"", processed.Text);
         AssertContains("width=\"100%\"", processed.Text);
         AssertContains("align=\"center\"", processed.Text);
         AssertDoesNotContain("onclick", processed.Text);
-        AssertNoExecutableHtml(processed.Text);
+        AssertNoScriptableHtml(processed.Text);
     }
 
     [Fact]
@@ -79,7 +79,7 @@ public sealed class UploadedFileProcessorTests
         foreach (var attack in attacks)
         {
             var processed = await ProcessHtmlAsync(attack);
-            AssertNoExecutableHtml(processed.Text);
+            AssertNoScriptableHtml(processed.Text);
         }
     }
 
@@ -99,9 +99,6 @@ public sealed class UploadedFileProcessorTests
             "<a href=\"vbscript:msgbox(1)\">Click</a>",
             "<a href=\"data:text/html,<script>alert(1)</script>\">Click</a>",
             "<a href=\"file:///etc/passwd\">Click</a>",
-            "<a href=\"http://example.com\">Click</a>",
-            "<a href=\"//example.com/path\">Click</a>",
-            "<a href=\"/relative/path\">Click</a>",
             "<a href=\"https://example.com/%0d%0aSet-Cookie:bad=true\">Click</a>",
             "<a href=\"mailto:support@example.com?subject=Hi%0ABcc:attacker@example.com\">Click</a>",
             "<a href=\"https://example.com/%3Cscript%3Ealert(1)%3C/script%3E\">Click</a>",
@@ -113,8 +110,8 @@ public sealed class UploadedFileProcessorTests
         foreach (var attack in attacks)
         {
             var processed = await ProcessHtmlAsync(attack);
-            AssertNoExecutableHtml(processed.Text);
-            AssertDoesNotMatch("\\s(?:href|src)=\"(?:javascript|vbscript|data|file|http):", processed.Text);
+            AssertNoScriptableHtml(processed.Text);
+            AssertDoesNotMatch("\\s(?:href|src)=\"(?:javascript|vbscript|data|file):", processed.Text);
         }
     }
 
@@ -133,7 +130,7 @@ public sealed class UploadedFileProcessorTests
         foreach (var attack in attacks)
         {
             var processed = await ProcessHtmlAsync(attack);
-            AssertNoExecutableHtml(processed.Text);
+            AssertNoScriptableHtml(processed.Text);
             AssertDoesNotContain("javascript:", processed.Text);
             AssertDoesNotContain("vbscript:", processed.Text);
             AssertDoesNotContain("data:text/html", processed.Text);
@@ -143,7 +140,7 @@ public sealed class UploadedFileProcessorTests
     }
 
     [Fact]
-    public async Task PreservesSafeStyleTagsAndInlineStyleAttributes()
+    public async Task StripsStyleTagsAndPreservesSafeInlineStyleAttributes()
     {
         const string html =
             "<!doctype html><html><head>" +
@@ -154,19 +151,19 @@ public sealed class UploadedFileProcessorTests
 
         var processed = await ProcessHtmlAsync(html);
 
-        AssertContains("<style", processed.Text);
-        AssertContains("</style>", processed.Text);
+        AssertDoesNotContain("<style", processed.Text);
+        AssertDoesNotContain("</style>", processed.Text);
         AssertContains("color:", processed.Text);
         AssertContains("margin:", processed.Text);
-        AssertContains("@media", processed.Text);
-        AssertContains("font-size:", processed.Text);
+        AssertDoesNotContain("@media", processed.Text);
+        AssertDoesNotContain("font-size:", processed.Text);
         AssertContains("style=", processed.Text);
-        AssertContains("mso-line-height-rule", processed.Text);
-        AssertNoExecutableHtml(processed.Text);
+        AssertDoesNotContain("mso-line-height-rule", processed.Text);
+        AssertNoScriptableHtml(processed.Text);
     }
 
     [Fact]
-    public async Task PreservesSafeEmailFontLinkAndMetaTags()
+    public async Task StripsHeadOnlyEmailMarkupAndPreservesSafeInlineStyles()
     {
         const string html =
             "<!doctype html><html><head>" +
@@ -181,21 +178,11 @@ public sealed class UploadedFileProcessorTests
 
         var processed = await ProcessHtmlAsync(html);
 
-        AssertContains("<meta", processed.Text);
-        AssertContains("charset=\"utf-8\"", processed.Text);
-        AssertContains("name=\"viewport\"", processed.Text);
-        AssertContains("width=device-width", processed.Text);
-        AssertContains("name=\"x-apple-disable-message-reformatting\"", processed.Text);
-        AssertContains("name=\"format-detection\"", processed.Text);
-        AssertContains("name=\"color-scheme\"", processed.Text);
-        AssertContains("<link", processed.Text);
-        AssertContains("rel=\"preconnect\"", processed.Text);
-        AssertContains("href=\"https://fonts.gstatic.com\"", processed.Text);
-        AssertContains("crossorigin=\"anonymous\"", processed.Text);
-        AssertContains("rel=\"stylesheet\"", processed.Text);
-        AssertContains("href=\"https://fonts.googleapis.com/css2?family=Inter:wght@400;700&amp;display=swap\"", processed.Text);
-        AssertContains("media=\"screen\"", processed.Text);
-        AssertNoExecutableHtml(processed.Text);
+        AssertDoesNotContain("<meta", processed.Text);
+        AssertDoesNotContain("<link", processed.Text);
+        AssertContains("style=", processed.Text);
+        AssertContains("font-family:", processed.Text);
+        AssertNoScriptableHtml(processed.Text);
     }
 
     [Fact]
@@ -219,7 +206,7 @@ public sealed class UploadedFileProcessorTests
         AssertDoesNotContain("refresh", processed.Text);
         AssertDoesNotContain("evil.example", processed.Text);
         AssertDoesNotContain("fonts.googleapis.com", processed.Text);
-        AssertNoExecutableHtml(processed.Text);
+        AssertNoScriptableHtml(processed.Text);
     }
 
     [Fact]
@@ -241,15 +228,18 @@ public sealed class UploadedFileProcessorTests
         foreach (var attack in attacks)
         {
             var processed = await ProcessHtmlAsync(attack);
-            AssertNoExecutableHtml(processed.Text);
+            AssertNoScriptableHtml(processed.Text);
         }
     }
 
     [Fact]
-    public async Task KeepsOnlyConservativeSafeEmailUrls()
+    public async Task KeepsHtmlSanitizerDefaultSafeUrls()
     {
         var processed = await ProcessHtmlAsync(
             "<a href=\"https://example.com?a=1&amp;b=2\" target=\"_blank\">Web</a>" +
+            "<a href=\"http://example.com\">Http</a>" +
+            "<a href=\"//example.com/path\">Protocol relative</a>" +
+            "<a href=\"/relative/path\">Relative</a>" +
             "<a href=\"mailto:support@example.com\">Mail</a>" +
             "<a href=\"tel:+48123456789\">Phone</a>" +
             "<a href=\"#intro\">Fragment</a>" +
@@ -257,28 +247,32 @@ public sealed class UploadedFileProcessorTests
             "<img src=\"cid:logo-image\" alt=\"Inline logo\">");
 
         AssertContains("href=\"https://example.com?a=1&amp;b=2\"", processed.Text);
-        AssertContains("target=\"_blank\" rel=\"noopener noreferrer\"", processed.Text);
-        AssertContains("href=\"mailto:support@example.com\"", processed.Text);
-        AssertContains("href=\"tel:+48123456789\"", processed.Text);
+        AssertContains("target=\"_blank\"", processed.Text);
+        AssertContains("href=\"http://example.com\"", processed.Text);
+        AssertContains("href=\"//example.com/path\"", processed.Text);
+        AssertContains("href=\"/relative/path\"", processed.Text);
+        AssertDoesNotContain("href=\"mailto:support@example.com\"", processed.Text);
+        AssertDoesNotContain("href=\"tel:+48123456789\"", processed.Text);
         AssertContains("href=\"#intro\"", processed.Text);
         AssertContains("src=\"https://example.com/logo.png\"", processed.Text);
         AssertContains("width=\"200\"", processed.Text);
         AssertContains("height=\"100\"", processed.Text);
         AssertContains("alt=\"Logo\"", processed.Text);
-        AssertContains("src=\"cid:logo-image\"", processed.Text);
+        AssertDoesNotContain("src=\"cid:logo-image\"", processed.Text);
         AssertContains("alt=\"Inline logo\"", processed.Text);
-        AssertNoExecutableHtml(processed.Text);
+        AssertNoScriptableHtml(processed.Text);
     }
 
     [Fact]
-    public async Task ForcesNoopenerAndNoreferrerForBlankTargets()
+    public async Task LeavesAnchorRelTokensToHtmlSanitizerDefaults()
     {
         var processed = await ProcessHtmlAsync(
             "<a href=\"https://example.com\" target=\"_blank\" rel=\"nofollow opener\">Open</a>");
 
         AssertContains("target=\"_blank\"", processed.Text);
-        AssertContains("rel=\"noopener noreferrer nofollow\"", processed.Text);
-        AssertNoExecutableHtml(processed.Text);
+        AssertContains("rel=\"nofollow opener\"", processed.Text);
+        AssertDoesNotContain("noreferrer", processed.Text);
+        AssertNoScriptableHtml(processed.Text);
     }
 
     [Fact]
@@ -340,7 +334,7 @@ public sealed class UploadedFileProcessorTests
         return await new UploadedFileProcessor().ProcessAsync(file);
     }
 
-    private static void AssertNoExecutableHtml(string html)
+    private static void AssertNoScriptableHtml(string html)
     {
         var forbiddenFragments = new[]
         {
@@ -351,10 +345,6 @@ public sealed class UploadedFileProcessorTests
             "<embed",
             "<svg",
             "<math",
-            "<form",
-            "<input",
-            "<button",
-            "<textarea",
             "<base",
             "srcdoc",
             "formaction",

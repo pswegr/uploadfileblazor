@@ -1,4 +1,5 @@
 using System.Text;
+using Ganss.Xss;
 using Microsoft.AspNetCore.Components.Forms;
 
 namespace UploadFileBlazor.Services;
@@ -105,7 +106,7 @@ public sealed class UploadedFileProcessor
 
     private static string SanitizeHtmlMarkup(string html)
     {
-        return EmailHtmlSanitizer.Sanitize(html);
+        return new HtmlSanitizer().Sanitize(html).Trim();
     }
 
     private static string RemoveUnsafeControlCharacters(string value)
